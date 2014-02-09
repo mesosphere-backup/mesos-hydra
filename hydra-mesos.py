@@ -12,6 +12,7 @@ import math
 import threading
 import socket
 import time
+import tempfile
 
 from optparse import OptionParser
 from subprocess import *
@@ -21,11 +22,11 @@ def printOutput(p):
       print line,
 
 def startMPIExec(procs, slaves, program):
-  # To work around _not_ being on a parallel file system, we use chroot hack.
-  os.chroot(os.getcwd())
+  os.symlink(os.getcwd() + '/export', work_dir + "/export")
+  os.chdir(work_dir)
 
   hosts = ",".join(slaves)
-  cmd = ["mpiexec.hydra", "-launcher", "manual", "-n", str(procs), '-hosts', hosts]
+  cmd = ["./export/bin/mpiexec.hydra", "-genv", "LD_LIBRARY_PATH", work_dir + "/libs", "-launcher", "manual", "-n", str(procs), "-hosts", str(hosts)]
   cmd.extend(program)
   p = Popen(cmd, stdout=PIPE)
 
@@ -59,8 +60,11 @@ def finalizeSlaves(callbacks):
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.connect((chost, cport))
-    s.send(proxy_arg)
+    request = work_dir + ";" + proxy_arg
+    s.send(request)
     s.close()
+
+    # TODO(nnielsen): Add retry logic; slave might not be listening yet.
 
   logging.info("Done finalizing slaves")
 
@@ -131,10 +135,14 @@ class HydraScheduler(mesos.Scheduler):
         r.begin = port
         r.end = port
 
+	lib = task.command.environment.variables.add()
+	lib.name = "LD_LIBRARY_PATH"
+	lib.value = work_dir + "/libs"
+
         hydra_uri = task.command.uris.add()
-        hydra_uri.value = name_node + "/hydra/hydra.tgz"
+        hydra_uri.value = "hdfs://" + name_node + "/hydra/hydra.tgz"
         executable_uri = task.command.uris.add()
-        executable_uri.value = name_node + "/hydra/" + mpi_program[0]
+        executable_uri.value = "hdfs://" + name_node + "/hydra/" + mpi_program[0]
 
         task.command.value = "python hydra-proxy.py %d" % port
 
@@ -216,7 +224,13 @@ if __name__ == "__main__":
   cores_per_node = procs_per_node * cores
   mem_per_node = options.mem
   mpi_program = args[1:]
+  
   name_node = options.name_node
+  if name_node == None:
+    name_node = os.environ.get("HDFS_NAME_NODE")
+    if name_node == None:
+      print >> sys.stderr, "HDFS name node not found."
+      exit(2)
 
   logging.info("Connecting to Mesos master %s" % args[0])
   logging.info("Total processes %d" % total_procs)
@@ -233,6 +247,8 @@ if __name__ == "__main__":
     framework.name = options.name
   else:
     framework.name = "MPICH2 Hydra : %s" % mpi_program[0]
+  
+  work_dir = tempfile.mkdtemp()
 
   driver = mesos.MesosSchedulerDriver(
     scheduler,
