@@ -1,0 +1,3 @@
+#!/bin/bash
+CWD=`pwd`
+LD_LIBRARY_PATH="${CWD}/export/libs" PYTHONPATH="${CWD}/mesos_0.16.0_amd64.egg" python mrun.py "$@"
